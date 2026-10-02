@@ -13,6 +13,7 @@
 #include <err.h>
 #include <pthread.h>
 #define fderr(fd) ((fd)<0)
+#define ERRFD (-1)
 #define O_WRONLY_CREAT O_WRONLY|O_CREAT|O_TRUNC,S_IRUSR|S_IWUSR
 #else
 
@@ -46,13 +47,14 @@
 #define O_WRONLY "wb"
 #define O_WRONLY_CREAT "wb"
 #define fderr(fd) (!(fd))
+#define ERRFD ((intptr_t)NULL)
 static __attribute__((unused)) intptr_t fake_open(const char *path,const char *flags){
 	FILE *fp;
 	errno=0;
 	fp=fopen(path,flags);
 	return (intptr_t)fp;
 }
-#define open fake_open
+#define open(fd,flag,...) fake_open((fd),(flag))
 static __attribute__((unused)) int fake_close(intptr_t fd){
 	errno=0;
 	fclose((FILE *)fd);

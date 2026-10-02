@@ -1,3 +1,4 @@
+# The Makefile is deprecated, use cmake instead.
 CC := gcc
 CFLAG := -Wall -O3
 LFLAG := xgraph/xgraph.a -lc -lm

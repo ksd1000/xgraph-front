@@ -10,37 +10,45 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <arpa/inet.h>
-#include <fcntl.h>
 #include <math.h>
 #include <err.h>
 #include <errno.h>
 #include <time.h>
-#include <syscall.h>
-#include <sys/wait.h>
-#include <sys/resource.h>
-#include <signal.h>
 #include <getopt.h>
 #include <stdarg.h>
 #include "bitmap.h"
 #define EXPR_BLOCKWARNING 1
 #include "expr.h"
-#define write(fd,buf,size) expr_internal_syscall3(SYS_write,fd,buf,size)
+#ifdef __unix__
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#define REAL_UNIX
+#endif
+#include "fake_unix.h"
 struct expr_symset *es=NULL;
+/*
 void sdtime(double dsec){
 	struct timespec ts;
 	ts.tv_sec=(time_t)dsec;
 	ts.tv_nsec=(time_t)((dsec-(double)(ts.tv_sec))*1000000000);
 	clock_nanosleep(CLOCK_REALTIME,0,&ts,NULL);
 }
+*/
 double dtime(void){
+#ifdef REAL_UNIX
 	struct timespec ts;
 	clock_gettime(CLOCK_REALTIME,&ts);
 	return (double)ts.tv_sec+ts.tv_nsec/1000000000.0;
+#else
+	return (double)time(NULL);
+#endif
 }
-int xopen(const char *path){
-	int r;
-	r=open(path,O_WRONLY|O_CREAT,S_IRUSR|S_IWUSR);
-	if(r<0){
+intptr_t xopen(const char *path){
+	intptr_t r;
+	r=open(path,O_WRONLY_CREAT,S_IRUSR|S_IWUSR);
+	if(fderr(r)){
 		err(EXIT_FAILURE,"cannot open \"%s\"",path);
 	}
 	return r;
@@ -53,7 +61,7 @@ void *xmalloc(size_t size){
 	}
 	return r;
 }
-static ssize_t readall(int fd,void *bufp){
+static ssize_t readall(intptr_t fd,void *bufp){
 	return expr_file_readfd((void *)read,fd,0,bufp);
 }
 int ff_output=0,quiet=0;
@@ -64,16 +72,17 @@ double bm_end=0.0;
 double bminterval=0.01;
 void bmload(const char *path){
 	ssize_t r;
-	int fd=open(path,O_RDONLY);
-	if(fd<0)
+	int rr;
+	intptr_t fd=open(path,O_RDONLY);
+	if(fderr(fd))
 		err(EXIT_FAILURE,"open");
 	r=readall(fd,&bm);
 	close(fd);
 	if(r<0)
 		err(EXIT_FAILURE,"readall");
-	fd=bm_check(bm,r);
-	if(fd<0)
-		errx(EXIT_FAILURE,"invaild bitmap (%d)",fd);
+	rr=bm_check(bm,r);
+	if(rr<0)
+		errx(EXIT_FAILURE,"invaild bitmap (%d)",rr);
 	bm_end=(bm->width+1)*bminterval;
 }
 int32_t bmratio=128;
@@ -291,7 +300,8 @@ double sample_freq_d=44100.0,msg_time_interval=0.05;
 volatile double vf=0.0;
 const char *outfile=NULL;
 char hotsym[EXPR_SYMLEN]={"hot"};
-int outfd=-1,raw=0;
+intptr_t outfd=ERRFD;
+int raw=0;
 #if !defined(U8)&&!defined(U16BE)&&!defined(U32BE)&&!defined(S32LE)
 #define S32LE
 #endif
@@ -321,8 +331,6 @@ int outfd=-1,raw=0;
 #define ampl_hton(_a) (_a)
 #define ffmpeg_extra ,"-c:a","pcm_u8",
 #endif
-ampl_type *buffer=NULL,*buffer_cur=NULL,*buffer_end=NULL;
-size_t buffer_size=PIPE_BUF;
 int unsafe=0;
 void setexpr(struct expr **p,const char *c){
 	int e;
@@ -350,26 +358,31 @@ __attribute__((constructor)) void atstart(void){
 	text_init();
 #endif
 }
+size_t buffer_size=0;
 __attribute__((destructor)) void atend(void){
 	if(ep)
 		expr_free(ep);
 	if(ept)
 		expr_free(ept);
 	expr_symset_free(es);
-	if(outfd>=0)
+	if(!fderr(outfd))
 		close(outfd);
-	if(buffer)
-		free(buffer);
+	if(buffer_size)
+		//free(buffer)
+			;
 	if(bm)
 		free(bm);
 #ifdef TEXT_ENABLED
 	sfreeall();
 #endif
 }
+#ifdef REAL_UNIX
 #define ffplay_arg "-f",ampl_fmt,"-ar",ar,"-i",pipename,"-autoexit","-nodisp","-hide_banner"
 #define ffmpeg_arg "-y","-f",ampl_fmt,"-ar",ar,"-i",pipename,"-hide_banner"
 pid_t fpid;
+#endif
 int getpipe(void){
+#ifdef REAL_UNIX
 	char pipename[32];
 	char ar[32];
 	int pipefd[2];
@@ -408,13 +421,12 @@ int getpipe(void){
 	fpid=pid;
 	close(pipefd[0]);
 	return pipefd[1];
+#else
+	errx(EXIT_FAILURE,"not on unix. use --raw.");
+#endif
 }
 double atod2(const char *str){
 	double r;
-	/*char *c;
-	r=strtod(str,&c);
-	if(c==str||*c)
-		errx(EXIT_FAILURE,"invaild double %s",str);*/
 	int error=0;
 	char err[EXPR_SYMLEN];
 	r=expr_calc5(str,&error,err,NULL,EXPR_IF_PROTECT|EXPR_IF_NOKEYWORD);
@@ -430,6 +442,7 @@ long atol2(const char *str){
 		errx(EXIT_FAILURE,"invaild integer: %s",str);
 	return r;
 }
+#ifdef REAL_UNIX
 sig_atomic_t sat=0;
 void sig(int s){
 	switch(s){
@@ -443,6 +456,7 @@ void sig(int s){
 			break;
 	}
 }
+#endif
 double det2freq(unsigned long det){
 	if(!det)
 		return 0.0;
@@ -537,7 +551,7 @@ const struct option ops[]={
 #define show(a,b) {if(sndbkn<0.0)out("\033[K\0337%.2lfs cost|%.2lfs written|freq=%.2lf (inaccurate)\0338",a,b,det2freq(det));else out("\033[K\0337%.2lfs cost|%.2lfs written|freq=%.2lf (inaccurate)|sound broken(%.2lfs)\0338",a,b,det2freq(det),sndbkn);}
 int main(int argc,char **argv){
 	double st,lt,ct,x,ovf,sndbkn;
-	unsigned long t,det,let;
+	ssize_t t,det,let;
 	ampl_type ampl;
 	int status;
 	if(argc<2){
@@ -548,7 +562,7 @@ show_help:
 				"\t-s,--sample sample_rate (default=%lu)\n"
 				"\t-o,--output filename\n"
 				"\t-q,--quiet[=time]\tdo not output message to screen\n"
-				"\t-b,--buffer[=size]\tcreate a buffer to write data,default size is PIPE_BUF(%zu)\n"
+				"\t-b,--buffer[=size]\tcreate a buffer to write data,default size is %zu\n"
 				"\t-r,--raw\toutput raw data to stdout or file\n"
 				"\t-h,--hot expression\thot function\n"
 				"\t-f,--ff-output\toutput message of ffplay/ffmpeg to screen\n"
@@ -583,7 +597,7 @@ show_help:
 				"format: " ampl_fmt "\n"
 				"ffplay/ffmpeg is required in playing/file-output mode.\n"
 				"compiled on " __DATE__ " "  __TIME__ "\n"
-				,argv[0],sample_freq,(size_t)PIPE_BUF,bminterval,bm_freq_lowest,bm_freq_functor,bmratio
+				,argv[0],sample_freq,(size_t)4096,bminterval,bm_freq_lowest,bm_freq_functor,bmratio
 #ifdef TEXT_ENABLED
 				,tfinterval,freq_lowest,freq_functor,ratio,tinterval,(int32_t)TEXT_HEIGHT
 #endif
@@ -616,7 +630,7 @@ show_help:
 					quiet=1;
 				break;
 			case 'b':
-				buffer_size=(optarg?atol2(optarg):PIPE_BUF);
+				buffer_size=(optarg?atol2(optarg):4096);
 				break;
 			case 'r':
 				raw=1;
@@ -766,20 +780,20 @@ break2:
 		printdouble(expr_eval(ep,calc_input));
 		return EXIT_SUCCESS;
 	}
-	if(raw)
+	if(raw){
 		outfd=(outfile?xopen(outfile):STDOUT_FILENO);
-	else
+		//printf("outfile=%s,fd=%d\n",outfile,outfd);
+	}else
 		outfd=getpipe();
 	if(buffer_size){
 		if(sizeof(ampl_type)>1)
 			buffer_size=(buffer_size+(sizeof(ampl_type)-1))&~(sizeof(ampl_type)-1);
-		buffer=xmalloc(buffer_size);
-		buffer_cur=buffer;
-		buffer_end=buffer+buffer_size/sizeof(ampl_type);
 	}
+#ifdef REAL_UNIX
 	signal(SIGPIPE,sig);
 	if(!noint)
 		signal(SIGINT,sig);
+#endif
 	st=dtime();
 	lt=st;
 	ct=st;
@@ -792,7 +806,11 @@ break2:
 	for(t=0;;++t){
 		x=(double)t/sample_freq;
 		vf=expr_eval(ep,x);
-		if((ept&&expr_eval(ept,x))||sat==2){
+		if((ept&&expr_eval(ept,x))
+#ifdef REAL_UNIX
+				||sat==2
+#endif
+				){
 			show(ct-st,x);
 			break;
 		}
@@ -815,35 +833,33 @@ break2:
 		ovf=vf;
         	ampl=ampl_make(vf);
 		ampl=ampl_hton(ampl);
-		if(!buffer){
+		if(!buffer_size){
 	        	write(outfd,&ampl,sizeof(ampl));
 		}else {
-			if(buffer_cur==buffer_end){
-				write(outfd,buffer,buffer_size);
-				buffer_cur=buffer;
-			}
-			*(buffer_cur++)=ampl;
+	        	write(outfd,&ampl,sizeof(ampl));
 		}
+#ifdef REAL_UNIX
 		if(sat==1){
 			outc('\n');
-			if(waitpid(fpid,&status,0)>=0&&WIFEXITED(status))
+			if(!raw&&waitpid(fpid,&status,0)>=0&&WIFEXITED(status))
 				errx(EXIT_FAILURE,"broken pipe (status:%d)",WEXITSTATUS(status));
 			errx(EXIT_FAILURE,"broken pipe");
 		}
+#endif
 		ct=dtime();
 		if(ct-lt>=msg_time_interval){
 			show(ct-st,x);
 			lt=ct;
 		}
 	}
-	if(buffer&&buffer_cur>buffer){
-		write(outfd,buffer,(buffer_cur-buffer)*sizeof(ampl));
-	}
+	//buffer
 	close(outfd);
-	outfd=-1;
+	outfd=ERRFD;
 	if(!quiet)
 		out("\ndata is written, %.2lfs remaining\n",x-(ct-st));
-	if(waitpid(fpid,&status,0)>=0&&WIFEXITED(status)&&WEXITSTATUS(status)!=EXIT_SUCCESS)
+#ifdef REAL_UNIX
+	if(!raw&&waitpid(fpid,&status,0)>=0&&WIFEXITED(status)&&WEXITSTATUS(status)!=EXIT_SUCCESS)
 		errx(EXIT_FAILURE,"failed (status:%d)",WEXITSTATUS(status));
+#endif
 	return EXIT_SUCCESS;
 }
