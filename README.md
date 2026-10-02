@@ -1,4 +1,6 @@
 # xgraph-front
+The repo is deprecated, see [graph-drawer](https://github.com/ksd1000/graph_drawer) for new version.
+
 Front end of [xgraph](https://github.com/kshadow1000/xgraph) library
 
 Example:
