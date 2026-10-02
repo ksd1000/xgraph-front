@@ -28,6 +28,70 @@
 #endif
 #include "fake_unix.h"
 struct expr_symset *es=NULL;
+#if !defined(U8)&&!defined(U16BE)&&!defined(U32BE)&&!defined(S32LE)
+#define S32LE
+#endif
+#if defined(U32BE)
+#define ampl_type uint32_t
+#define ampl_fmt "u32be"
+#define ampl_make(_dampl) (ampl_type)(UINT32_MAX*0.5*(1+(_dampl)))
+#define ampl_hton(_a) htonl(_a)
+#define ffmpeg_extra ,
+#elif defined(S32LE)
+#define ampl_type int32_t
+#define ampl_fmt "s32le"
+#define ampl_make(_dampl) (ampl_type)(INT32_MAX*(_dampl))
+#define ampl_hton(_a) (_a)
+#define ffmpeg_extra ,"-c:a","pcm_s32le",
+#elif defined(U16BE)
+#define ampl_type uint16_t
+#define ampl_fmt "u16be"
+#define ampl_make(_dampl) (ampl_type)(UINT16_MAX*0.5*(1+(_dampl)))
+#define ampl_hton(_a) htons(_a)
+#define ffmpeg_extra ,
+#elif defined(U8)
+#define ampl_type uint8_t
+#define ampl_fmt "u8"
+#define ampl_make(_dampl) (ampl_type)(UINT8_MAX*0.5*(1+(_dampl)))
+#define ampl_hton(_a) (_a)
+#define ffmpeg_extra ,"-c:a","pcm_u8",
+#endif
+#define magic32(a0,a1,a2,a3) (((a0))|((a1)<<8)|((a2)<<16)|((a3)<<24))
+struct header_wav {
+	uint32_t riff_magic;//"RIFF"
+	uint32_t riff_size;
+	uint32_t wave_magic;//"WAVE"
+	uint32_t fmtw_magic;//"fmt "
+	uint32_t subchunk_size;//16 (pcm)
+	uint16_t audio_format;//1
+	uint16_t channel;//1
+	uint32_t sample;
+	uint32_t byte_rate;
+	uint16_t block_align;
+	uint16_t bps;//bit_per_sample
+	uint32_t data_magic;//"data"
+	uint32_t data_size;
+	char data[];
+}__attribute__((packed));
+void fillheader_wav(struct header_wav *restrict hw,size_t size,uint32_t sample){
+	hw->riff_magic=magic32('R','I','F','F');
+	hw->wave_magic=magic32('W','A','V','E');
+	hw->fmtw_magic=magic32('f','m','t',' ');
+	hw->data_magic=magic32('d','a','t','a');
+	hw->subchunk_size=16;
+	hw->audio_format=1;
+	hw->channel=1;
+	hw->sample=sample;
+	hw->data_size=size;
+	hw->byte_rate=sample*sizeof(ampl_type);
+	hw->block_align=sizeof(ampl_type);
+	hw->riff_size=36+size;
+#ifdef U8
+		+(size&1)
+#endif
+		;
+	hw->bps=sizeof(ampl_type)*8;
+}
 /*
 void sdtime(double dsec){
 	struct timespec ts;
@@ -302,35 +366,7 @@ const char *outfile=NULL;
 char hotsym[EXPR_SYMLEN]={"hot"};
 intptr_t outfd=ERRFD;
 int raw=0;
-#if !defined(U8)&&!defined(U16BE)&&!defined(U32BE)&&!defined(S32LE)
-#define S32LE
-#endif
 
-#if defined(U32BE)
-#define ampl_type uint32_t
-#define ampl_fmt "u32be"
-#define ampl_make(_dampl) (ampl_type)(UINT32_MAX*0.5*(1+(_dampl)))
-#define ampl_hton(_a) htonl(_a)
-#define ffmpeg_extra ,
-#elif defined(S32LE)
-#define ampl_type int32_t
-#define ampl_fmt "s32le"
-#define ampl_make(_dampl) (ampl_type)(INT32_MAX*(_dampl))
-#define ampl_hton(_a) (_a)
-#define ffmpeg_extra ,"-c:a","pcm_s32le",
-#elif defined(U16BE)
-#define ampl_type uint16_t
-#define ampl_fmt "u16be"
-#define ampl_make(_dampl) (ampl_type)(UINT16_MAX*0.5*(1+(_dampl)))
-#define ampl_hton(_a) htons(_a)
-#define ffmpeg_extra ,
-#elif defined(U8)
-#define ampl_type uint8_t
-#define ampl_fmt "u8"
-#define ampl_make(_dampl) (ampl_type)(UINT8_MAX*0.5*(1+(_dampl)))
-#define ampl_hton(_a) (_a)
-#define ffmpeg_extra ,"-c:a","pcm_u8",
-#endif
 int unsafe=0;
 void setexpr(struct expr **p,const char *c){
 	int e;
@@ -359,6 +395,7 @@ __attribute__((constructor)) void atstart(void){
 #endif
 }
 size_t buffer_size=0;
+struct expr_buffered_file bf;
 __attribute__((destructor)) void atend(void){
 	if(ep)
 		expr_free(ep);
@@ -368,8 +405,7 @@ __attribute__((destructor)) void atend(void){
 	if(!fderr(outfd))
 		close(outfd);
 	if(buffer_size)
-		//free(buffer)
-			;
+		expr_buffered_close(&bf);
 	if(bm)
 		free(bm);
 #ifdef TEXT_ENABLED
@@ -514,7 +550,7 @@ void printdouble(double x){
 int calc=0,noint=0;
 double calc_input=0.0;
 const struct option ops[]={
-	{"cond",1,NULL,'c'},
+	{"cancel",1,NULL,'c'},
 	{"sample",1,NULL,'s'},
 	{"output",1,NULL,'o'},
 	{"quiet",2,NULL,'q'},
@@ -526,6 +562,7 @@ const struct option ops[]={
 	{"calc",2,NULL,'C'},
 	{"unsafe",2,NULL,'u'},
 	{"no-catch-SIGINT",0,NULL,'i'},
+	{"header",0,NULL,'W'},
 	{"list",2,NULL,'l'},
 	{"help",0,NULL,0x706c6568},
 	{"in",1,NULL,0x6e69},
@@ -549,16 +586,17 @@ const struct option ops[]={
 	{NULL,0,NULL,0}
 };
 #define show(a,b) {if(sndbkn<0.0)out("\033[K\0337%.2lfs cost|%.2lfs written|freq=%.2lf (inaccurate)\0338",a,b,det2freq(det));else out("\033[K\0337%.2lfs cost|%.2lfs written|freq=%.2lf (inaccurate)|sound broken(%.2lfs)\0338",a,b,det2freq(det),sndbkn);}
+int head=0;
 int main(int argc,char **argv){
 	double st,lt,ct,x,ovf,sndbkn;
-	ssize_t t,det,let;
+	ssize_t t,det,let,endt;
 	ampl_type ampl;
 	int status;
 	if(argc<2){
 show_help:
 		fprintf(stdout,"usage: %s [options] expression\n"
 				"\texpresion\tsuch as \"sin(4400*2*pi*t)\" which will generate a sine wave with a frequency of 4400Hz\n"
-				"\t-c,--cond expression\tcondition to stop\n"
+				"\t-c,--cancel expression\ttime to stop\n"
 				"\t-s,--sample sample_rate (default=%lu)\n"
 				"\t-o,--output filename\n"
 				"\t-q,--quiet[=time]\tdo not output message to screen\n"
@@ -569,6 +607,7 @@ show_help:
 				"\t-C,--calc[=input]\tevaluate the expression only\n"
 				"\t-u,--unsafe\tallow unsafe operations(e.g. explode() and direct memory access [] which may cause SIGSEGV)\n"
 				"\t-i,--no-catch-SIGINT\tdo not catch SIGINT\n"
+				"\t-W,--header\twrite the header of .wav before data\n"
 				"\t-l,--list[=category]\tlist function,variable,etc\n"
 				"\t--help\tshow this help\n"
 				"options for bitmap:\n"
@@ -606,14 +645,14 @@ show_help:
 	}
 	opterr=1;
 	for(;;){
-		switch(getopt_long(argc,argv,"c:s:o:q::b::rh:H:fC::ul::imvn:w:t:a:"
+		switch(getopt_long(argc,argv,"c:s:o:q::b::rh:H:fC::ul::iWmvn:w:t:a:"
 #ifdef TEXT_ENABLED
 					"T:RMVI:L:F:A:D:"
 #endif
 					,ops,NULL)){
 			case 'c':
 				if(ept)
-					errx(EXIT_FAILURE,"cond redefined");
+					errx(EXIT_FAILURE,"cancel redefined");
 				setexpr(&ept,optarg);
 				break;
 			case 's':
@@ -657,6 +696,9 @@ show_help:
 				break;
 			case 'i':
 				noint=1;
+				break;
+			case 'W':
+				head^=1;
 				break;
 			case 0x706c6568:
 				goto show_help;
@@ -785,15 +827,32 @@ break2:
 		//printf("outfile=%s,fd=%d\n",outfile,outfd);
 	}else
 		outfd=getpipe();
-	if(buffer_size){
-		if(sizeof(ampl_type)>1)
-			buffer_size=(buffer_size+(sizeof(ampl_type)-1))&~(sizeof(ampl_type)-1);
-	}
 #ifdef REAL_UNIX
 	signal(SIGPIPE,sig);
 	if(!noint)
 		signal(SIGINT,sig);
 #endif
+	if(buffer_size){
+		expr_buffered_init(&bf,outfd,(expr_writer)write,NULL,buffer_size);
+	}
+	if(ept)
+		endt=expr_eval(ept,0.0)*sample_freq;
+	else
+		endt=SSIZE_MAX;
+#define write_common(buf,size) ({\
+	if(!buffer_size){\
+        	write(outfd,buf,size);\
+	}else {\
+        	expr_buffered_write(&bf,buf,size);\
+	}\
+})
+	if(head){
+		struct header_wav hw;
+		if(!ept)
+			errx(EXIT_FAILURE,"--cancel must be defined with --header");
+		fillheader_wav(&hw,endt*sizeof(ampl),sample_freq);
+		write_common(&hw,sizeof(hw));
+	}
 	st=dtime();
 	lt=st;
 	ct=st;
@@ -803,21 +862,19 @@ break2:
 	det=0;
 	sndbkn=-1.0;
 	show(0.0,0.0);
-	for(t=0;;++t){
+	for(t=0;t<endt;++t){
 		x=(double)t/sample_freq;
 		vf=expr_eval(ep,x);
-		if((ept&&expr_eval(ept,x))
 #ifdef REAL_UNIX
-				||sat==2
-#endif
-				){
+		if(expr_unlikely(sat==2)){
 			show(ct-st,x);
 			break;
 		}
-		if(vf>1){
+#endif
+		if(expr_unlikely(vf>1)){
 			vf=1;
 			sndbkn=x;
-		}else if(vf<-1){
+		}else if(expr_unlikely(vf<-1)){
 			vf=-1;
 			sndbkn=x;
 		}
@@ -833,11 +890,7 @@ break2:
 		ovf=vf;
         	ampl=ampl_make(vf);
 		ampl=ampl_hton(ampl);
-		if(!buffer_size){
-	        	write(outfd,&ampl,sizeof(ampl));
-		}else {
-	        	write(outfd,&ampl,sizeof(ampl));
-		}
+		write_common(&ampl,sizeof(ampl));
 #ifdef REAL_UNIX
 		if(sat==1){
 			outc('\n');
@@ -852,7 +905,13 @@ break2:
 			lt=ct;
 		}
 	}
-	//buffer
+#ifdef U8
+	if(endt&1)
+	write_common("",1);
+#endif
+	if(buffer_size){
+		expr_buffered_flush(&bf);
+	}
 	close(outfd);
 	outfd=ERRFD;
 	if(!quiet)
