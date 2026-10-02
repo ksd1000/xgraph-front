@@ -594,3 +594,7 @@ const struct expr_builtin_symbol systable[]={
 	{.str=NULL}
 };
 #endif
+void add_all_common_symbols(struct expr_symset *es){
+	add_common_symbols(es);
+	expr_builtin_symbol_addall(es,systable);
+}

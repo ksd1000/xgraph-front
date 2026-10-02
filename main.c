@@ -274,9 +274,7 @@ int main(int argc,char **argv){
 
 	expr_builtin_symbol_addalls(es,expr_symbols_all);
 	expr_symset_add(es,"draw_connect",EXPR_MDFUNCTION,0,draw_connect,4ul);
-#ifdef COMMON_SYMBOLS
 	add_common_symbols(es);
-#endif
 	//draw start
 	if(argscan(argc-1,argv+1,1,ats,drawat)<0)
 		exit(EXIT_FAILURE);

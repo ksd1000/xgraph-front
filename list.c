@@ -52,7 +52,6 @@ const char *t2s[]={
 	[EXPR_HOTFUNCTION]="Hot function",
 	[EXPR_ZAFUNCTION]="Zero-argument function"
 };
-void add_common_symbols(struct expr_symset *);
 const char *aflag(int type,int flag,size_t dim){
 	static char abuf[64];
 	static char abuf1[64+16+20];
@@ -148,13 +147,12 @@ void list_symbol(struct expr_symbol *p){
 
 	}
 }
+void add_all_common_symbols(struct expr_symset *);
 int adbt=0;
 void list_common(void){
 	size_t n=0;
 	struct expr_symset es[1]={EXPR_SYMSET_INITIALIZER};
-#ifdef COMMON_SYMBOLS
-	add_common_symbols(es);
-#endif
+	add_all_common_symbols(es);
 	if(adbt)
 		expr_builtin_symbol_addalls(es,expr_symbols_all);
 //	expr_symset_callback(es,list_symbol,NULL);

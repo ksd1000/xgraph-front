@@ -56,4 +56,4 @@ target_link_libraries(list ${COMMON_LIBS})
 add_executable(calc calc.c ${COMMON_SRCS})
 target_link_libraries(calc ${COMMON_LIBS})
 
-file(COPY echo.calc ping.calc DESTINATION ${PROJECT_BINARY_DIR})
+file(COPY echo.calc ping.calc uniq.calc DESTINATION ${PROJECT_BINARY_DIR})
